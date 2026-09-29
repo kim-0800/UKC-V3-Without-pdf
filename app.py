@@ -160,7 +160,6 @@ dynamic_draft = round(draft + squat, 2)
 st.write(
     f"**航道設計水深**：`{channel_depth}m` ｜ **計算下沉量 (Squat)**：`{squat}m` ｜ **總動態吃水**：`{dynamic_draft}m`"
 )
-
 # --- 4. 完全呼叫中央氣象署 (CWA) API 抓取資料 ---
 CWA_API_KEY = "CWA-BD9BB68F-C6F0-4960-B0F0-98E82A8C3AB3"
 
@@ -169,35 +168,52 @@ CWA_API_KEY = "CWA-BD9BB68F-C6F0-4960-B0F0-98E82A8C3AB3"
 def fetch_cwa_api_tides(api_key, location):
     """直接從中央氣象署 F-A0021-001 開放資料 API 抓取逐時潮汐預報數據"""
     url = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-A0021-001"
-    params = {"Authorization": api_key, "LocationName": location}
+    params = {
+        "Authorization": api_key,
+        "LocationName": location,
+        "sort": "validTime",
+    }
     try:
-        # 加入 verify=False 繞過 Streamlit 伺服器的 SSL 憑證驗證問題
         res = requests.get(
             url, params=params, timeout=10, verify=False
         )
         if res.status_code == 200:
             data = res.json()
-            locations = data["records"]["location"]
+            records = data.get("records", {})
+
+            # 兼容氣象署 JSON 結構的不同 Key (location, Station, SeaLocation)
+            locations = (
+                records.get("location")
+                or records.get("Station")
+                or records.get("SeaLocation")
+                or []
+            )
+
+            if isinstance(locations, dict):
+                locations = [locations]
+
             parsed_tides = {}
             for loc in locations:
-                if loc.get("locationName") == location:
-                    station_data = loc.get("validTime", [])
-                    for item in station_data:
-                        t_str = item["startTime"]
-                        element_val = item.get("weatherElement", [])
-                        for elem in element_val:
-                            if elem["elementName"] == "TideHeights":
-                                cm_val = float(elem["elementValue"])
-                                parsed_tides[t_str] = round(
-                                    cm_val / 100.0, 2
-                                )  # cm 轉成公尺 m
-                    if parsed_tides:
-                        return parsed_tides, None
-            return None, "API 回傳資料中無此測站數據"
+                loc_name = loc.get("locationName") or loc.get("StationName") or ""
+                if location in loc_name or not loc_name:
+                    valid_times = loc.get("validTime") or loc.get("validtime") or loc.get("WeatherElement", [])
+                    for item in valid_times:
+                        t_str = item.get("startTime") or item.get("DataTime") or ""
+                        elements = item.get("weatherElement") or item.get("Element") or []
+                        for elem in elements:
+                            elem_name = elem.get("elementName") or elem.get("ElementName")
+                            if elem_name == "TideHeights":
+                                cm_val = float(elem.get("elementValue") or elem.get("ElementValue"))
+                                parsed_tides[t_str] = round(cm_val / 100.0, 2)
+
+            if parsed_tides:
+                return parsed_tides, None
+
+            return None, f"未找到【{location}】測站資料"
         else:
             return None, f"HTTP 錯誤代碼: {res.status_code}"
     except Exception as e:
-        return None, f"連線異常: {str(e)}"
+        return None, f"連線解析異常: {str(e)}"
 
 
 # 執行 API 抓取
@@ -219,7 +235,7 @@ if cwa_tides:
         t_time = base_time + timedelta(hours=i)
         time_key = t_time.strftime("%Y-%m-%d %H:00:00")
 
-        # 若 API 有該時間點則讀取，若無則標示為 None
+        # 若 API 有該時間點則讀取
         tide = cwa_tides.get(time_key, None)
 
         if tide is not None:
@@ -260,7 +276,7 @@ if not cwa_tides or not processed_results:
     st.error(f"❌ 潮汐資料抓取失敗或氣象署 API 無回應。原因：{err_msg}")
     st.info("💡 請確認網路連線正常，或稍後再試。")
 else:
-    # 根據動態動態狀態改變背景色彩
+    # 根據動態狀態改變背景色彩
     bg_color_map = {"GREEN": "#e8f8f5", "YELLOW": "#fef9e7", "RED": "#fadbd8"}
     bg_color = bg_color_map.get(current_status, "#ffffff")
 
