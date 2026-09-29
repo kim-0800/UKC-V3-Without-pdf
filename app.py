@@ -363,4 +363,30 @@ else:
         )
     elif current_status == "YELLOW":
         st.warning(
-            f"🟡 **【{selected_port}】當前時刻 ({now.strftime('%H:%M')}) 為限制通行狀況。** (UKC 裕度: `{curren
+            f"🟡 **【{selected_port}】當前時刻 ({now.strftime('%H:%M')}) 為限制通行狀況。** (UKC 裕度: `{current_ukc_pct:.1f}%`)"
+        )
+    else:
+        st.error(
+            f"🔴 **【{selected_port}】當前時刻 ({now.strftime('%H:%M')}) 禁止過灘！** 水深裕度不足 (UKC 裕度: `{current_ukc_pct:.1f}%`)"
+        )
+
+    st.markdown("---")
+
+    # 圖表與表格
+    st.subheader("📈 未來 24 小時潮圖與水深裕度分析")
+    df_chart = pd.DataFrame(processed_results)
+    chart_data = pd.DataFrame(
+        {
+            "時間": df_chart["time_clean"],
+            "可用總水深 (m)": df_chart["可用水深(m)"],
+            "動態吃水 (m)": [dynamic_draft] * len(df_chart),
+        }
+    ).set_index("時間")
+
+    st.line_chart(chart_data)
+
+    st.subheader("📊 未來 24 小時動態數據細節")
+    df_display = pd.DataFrame(processed_results)[
+        ["時間", "潮高(m)", "可用水深(m)", "UKC %", "狀態"]
+    ]
+    st.dataframe(df_display, use_container_width=True)
