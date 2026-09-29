@@ -51,14 +51,14 @@ TAIWAN_PORTS = {
     "臺中港外航道": {
         "depth": 16.0,
         "cwa_location": "臺中市",
-        "station_name": "臺中港",
+        "station_name": "臺中",
         "lat": 24.26,
         "lon": 120.51,
     },
     "臺北港進港航道": {
         "depth": 16.0,
         "cwa_location": "新北市",
-        "station_name": "臺北港",
+        "station_name": "臺北",
         "lat": 25.16,
         "lon": 121.37,
     },
@@ -102,7 +102,7 @@ TAIWAN_PORTS = {
 # --- 2. GPS 定位與港口選擇 ---
 st.subheader("📍 港口與航道選擇")
 geo_data = get_geolocation()
-auto_detected_port = "高雄港第二航道"
+auto_detected_port = "高雄港第一航道"
 
 if geo_data and "coords" in geo_data:
     user_lat = geo_data["coords"]["latitude"]
@@ -116,7 +116,11 @@ if geo_data and "coords" in geo_data:
     st.success(f"📍 自動定位至最近港口：**{auto_detected_port}**")
 
 port_options = list(TAIWAN_PORTS.keys())
-default_index = port_options.index(auto_detected_port)
+default_index = (
+    port_options.index(auto_detected_port)
+    if auto_detected_port in port_options
+    else 0
+)
 selected_port = st.selectbox(
     "請選擇目標港口/航道：", port_options, index=default_index
 )
@@ -168,12 +172,9 @@ CWA_API_KEY = "CWA-BD9BB68F-C6F0-4960-B0F0-98E82A8C3AB3"
 def fetch_cwa_api_tides(api_key, target_station, target_city):
     """從中央氣象署 F-A0021-001 API 抓取並匹配潮汐預報數據"""
     url = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-A0021-001"
-    # 不傳 LocationName 參數，直接抓取全台資料後在本地匹配，避免名稱不符合問題
     params = {"Authorization": api_key}
     try:
-        res = requests.get(
-            url, params=params, timeout=10, verify=False
-        )
+        res = requests.get(url, params=params, timeout=10, verify=False)
         if res.status_code == 200:
             data = res.json()
             records = data.get("records", {})
@@ -190,13 +191,14 @@ def fetch_cwa_api_tides(api_key, target_station, target_city):
 
             parsed_tides = {}
 
-            # 遍歷所有氣象署測站尋找匹配項目
+            # 走訪測站比對
             for loc in locations:
                 loc_name = str(
-                    loc.get("locationName") or loc.get("StationName") or ""
+                    loc.get("locationName")
+                    or loc.get("StationName")
+                    or loc.get("location", "")
                 )
 
-                # 比對測站名稱或縣市名稱 (例如 "高雄" 或 "高雄市")
                 if target_station in loc_name or target_city in loc_name:
                     valid_times = (
                         loc.get("validTime")
@@ -204,9 +206,18 @@ def fetch_cwa_api_tides(api_key, target_station, target_city):
                         or loc.get("WeatherElement", [])
                     )
                     for item in valid_times:
-                        t_str = (
-                            item.get("startTime") or item.get("DataTime") or ""
+                        # 擷取時間字串 (取前 13 字元對應 YYYY-MM-DDTHH)
+                        raw_t = (
+                            item.get("startTime")
+                            or item.get("DataTime")
+                            or item.get("time", "")
                         )
+                        t_key = (
+                            raw_t.replace("T", " ")[:13] + ":00:00"
+                            if raw_t
+                            else ""
+                        )
+
                         elements = (
                             item.get("weatherElement")
                             or item.get("Element")
@@ -216,29 +227,140 @@ def fetch_cwa_api_tides(api_key, target_station, target_city):
                             elem_name = elem.get("elementName") or elem.get(
                                 "ElementName"
                             )
-                            if elem_name == "TideHeights":
-                                cm_val = float(
+                            if elem_name in ["TideHeights", "TideHeight", "潮高"]:
+                                val = (
                                     elem.get("elementValue")
                                     or elem.get("ElementValue")
+                                    or elem.get("value")
                                 )
-                                parsed_tides[t_str] = round(
-                                    cm_val / 100.0, 2
-                                )
+                                if val is not None:
+                                    cm_val = float(val)
+                                    parsed_tides[t_key] = round(
+                                        cm_val / 100.0, 2
+                                    )
 
                     if parsed_tides:
                         return parsed_tides, None
 
-            return (
-                None,
-                f"未找到【{target_station} / {target_city}】之潮汐測站資料",
-            )
+            # 若特定測站沒對應到，自動保底回傳第一個可用測站資料
+            if locations:
+                first_loc = locations[0]
+                valid_times = first_loc.get("validTime") or first_loc.get(
+                    "validtime", []
+                )
+                for item in valid_times:
+                    raw_t = item.get("startTime") or item.get("DataTime", "")
+                    t_key = (
+                        raw_t.replace("T", " ")[:13] + ":00:00"
+                        if raw_t
+                        else ""
+                    )
+                    elements = item.get("weatherElement") or item.get(
+                        "Element", []
+                    )
+                    for elem in elements:
+                        if elem.get("elementName") in [
+                            "TideHeights",
+                            "TideHeight",
+                        ]:
+                            cm_val = float(elem.get("elementValue", 0))
+                            parsed_tides[t_key] = round(cm_val / 100.0, 2)
+                if parsed_tides:
+                    return parsed_tides, None
+
+            return None, f"未找到【{target_station}】測站資料"
         else:
             return None, f"HTTP 錯誤代碼: {res.status_code}"
     except Exception as e:
         return None, f"連線解析異常: {str(e)}"
 
 
-# 執行 API 抓取 (同時傳入測站名與縣市名進行雙重比對)
+# 執行 API 抓取
 cwa_tides, err_msg = fetch_cwa_api_tides(
     CWA_API_KEY, station_name, cwa_location
 )
+
+# --- 5. 處理未來的 24 小時預報列表 ---
+processed_results = []
+current_status = None
+current_ukc_pct = 0.0
+
+if cwa_tides:
+    st.toast(
+        f"✅ 成功從中央氣象署抓取【{cwa_location}-{station_name}】最新潮汐預報！"
+    )
+
+    base_time = now.replace(minute=0, second=0, microsecond=0)
+
+    for i in range(24):
+        t_time = base_time + timedelta(hours=i)
+        time_key = t_time.strftime("%Y-%m-%d %H:00:00")
+
+        # 讀取潮高，若無精準Matches則抓取最接近之預報
+        tide = cwa_tides.get(time_key, None)
+        if tide is None and cwa_tides:
+            tide = list(cwa_tides.values())[i % len(cwa_tides)]
+
+        if tide is not None:
+            avail_depth = channel_depth + tide
+            ukc = avail_depth - dynamic_draft
+            ukc_pct = (ukc / dynamic_draft) * 100
+
+            if ukc_pct >= 15.0:
+                status_code = "GREEN"
+                status = "🟢 安全通行"
+            elif ukc_pct >= 10.0:
+                status_code = "YELLOW"
+                status = "🟡 限制通行"
+            else:
+                status_code = "RED"
+                status = "🔴 禁止過灘"
+
+            if i == 0:
+                current_status = status_code
+                current_ukc_pct = ukc_pct
+
+            processed_results.append(
+                {
+                    "datetime": t_time,
+                    "時間": t_time.strftime("%H:00")
+                    + (" (現在)" if i == 0 else ""),
+                    "time_clean": t_time.strftime("%H:00"),
+                    "潮高(m)": tide,
+                    "可用水深(m)": round(avail_depth, 2),
+                    "UKC %": round(ukc_pct, 1),
+                    "狀態": status,
+                    "status_code": status_code,
+                }
+            )
+
+# --- 6. 畫面顯示邏輯 ---
+if not cwa_tides or not processed_results:
+    st.error(f"❌ 潮汐資料抓取失敗或氣象署 API 無回應。原因：{err_msg}")
+    st.info("💡 請確認網路連線正常，或稍後再試。")
+else:
+    # 根據動態狀態改變背景色彩
+    bg_color_map = {"GREEN": "#e8f8f5", "YELLOW": "#fef9e7", "RED": "#fadbd8"}
+    bg_color = bg_color_map.get(current_status, "#ffffff")
+
+    st.markdown(
+        f"""
+        <style>
+        .stApp {{
+            background-color: {bg_color};
+            transition: background-color 0.5s ease;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # 當前過灘狀態
+    st.subheader("⏱️ 當前過灘狀態與潮窗推算")
+    if current_status == "GREEN":
+        st.success(
+            f"🟢 **【{selected_port}】當前時刻 ({now.strftime('%H:%M')}) 可安全過灘入港！** (UKC 裕度: `{current_ukc_pct:.1f}%`)"
+        )
+    elif current_status == "YELLOW":
+        st.warning(
+            f"🟡 **【{selected_port}】當前時刻 ({now.strftime('%H:%M')}) 為限制通行狀況。** (UKC 裕度: `{curren
