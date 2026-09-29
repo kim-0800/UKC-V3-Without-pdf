@@ -1,300 +1,832 @@
-from datetime import datetime, timedelta
-import pandas as pd
-import pytz
-import requests
 import streamlit as st
-from streamlit_js_eval import get_geolocation
-import urllib3
+import requests
+import pandas as pd
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-# 關閉不安全 HTTPS 請求的 SSL 警告訊息
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 頁面基本設定
+# ============================================================
+# 基本設定
+# ============================================================
+
 st.set_page_config(
-    page_title="全臺港口動態過灘與 UKC 評估系統 (API 即時版)",
-    page_icon="🚢",
-    layout="centered",
+    page_title="台灣港口潮汐與 UKC 評估系統",
+    page_icon="⚓",
+    layout="wide",
 )
 
-# 時區設定（台灣時間）
-tw_tz = pytz.timezone("Asia/Taipei")
-now = datetime.now(tw_tz)
 
-st.title("🚢 全臺港口動態過灘與 UKC 評估系統")
-st.caption(
-    f"📅 當前時間：{now.strftime('%Y-%m-%d %H:%M:%S')} (CST) ｜ 資料來源：中央氣象署 API 即時資料"
+# ============================================================
+# 系統設定
+# ============================================================
+
+TW_TZ = ZoneInfo("Asia/Taipei")
+
+CWA_API_URL = (
+    "https://opendata.cwa.gov.tw/"
+    "api/v1/rest/datastore/F-A0021-001"
 )
 
-# --- 1. 全臺灣主要港口與氣象署對應縣市名稱 ---
-TAIWAN_PORTS = {
+
+# ============================================================
+# CWA API Key
+#
+# API Key 不要寫在這裡。
+# 請放到 Streamlit Cloud → Settings → Secrets
+#
+# CWA_API_KEY = "你的 API Key"
+# ============================================================
+
+try:
+    CWA_API_KEY = st.secrets["CWA_API_KEY"]
+except Exception:
+    CWA_API_KEY = ""
+
+
+# ============================================================
+# 港口資料
+#
+# depth = 航道設計水深
+# cwa_location = CWA 潮汐地點
+#
+# 第一版先用固定 CWA 地點。
+# 後續可以再進一步改成 stationId 精確對應。
+# ============================================================
+
+PORTS = {
     "高雄港第二航道": {
         "depth": 17.0,
-        "cwa_location": "高雄市",
-        "station_name": "高雄",
-        "lat": 22.56,
-        "lon": 120.30,
+        "cwa_location": "高雄",
     },
+
     "高雄港第一航道": {
         "depth": 15.0,
-        "cwa_location": "高雄市",
-        "station_name": "高雄",
-        "lat": 22.61,
-        "lon": 120.27,
+        "cwa_location": "高雄",
     },
+
     "基隆港主航道": {
         "depth": 15.5,
-        "cwa_location": "基隆市",
-        "station_name": "基隆",
-        "lat": 25.15,
-        "lon": 121.75,
+        "cwa_location": "基隆",
     },
+
     "臺中港外航道": {
         "depth": 16.0,
-        "cwa_location": "臺中市",
-        "station_name": "臺中",
-        "lat": 24.26,
-        "lon": 120.51,
+        "cwa_location": "臺中",
     },
+
     "臺北港進港航道": {
         "depth": 16.0,
-        "cwa_location": "新北市",
-        "station_name": "臺北",
-        "lat": 25.16,
-        "lon": 121.37,
+        "cwa_location": "臺北",
     },
+
     "淡水港航道": {
         "depth": 9.0,
-        "cwa_location": "新北市",
-        "station_name": "淡水",
-        "lat": 25.17,
-        "lon": 121.43,
+        "cwa_location": "淡水",
     },
+
     "花蓮港進港航道": {
         "depth": 14.0,
-        "cwa_location": "花蓮縣",
-        "station_name": "花蓮",
-        "lat": 23.98,
-        "lon": 121.63,
+        "cwa_location": "花蓮",
     },
+
     "蘇澳港進港航道": {
         "depth": 15.0,
-        "cwa_location": "宜蘭縣",
-        "station_name": "蘇澳",
-        "lat": 24.60,
-        "lon": 121.87,
+        "cwa_location": "蘇澳",
     },
+
     "安平港進港航道": {
         "depth": 12.0,
-        "cwa_location": "臺南市",
-        "station_name": "安平",
-        "lat": 22.98,
-        "lon": 120.15,
+        "cwa_location": "安平",
     },
+
     "麥寮工業港": {
         "depth": 24.0,
-        "cwa_location": "雲林縣",
-        "station_name": "麥寮",
-        "lat": 23.78,
-        "lon": 120.14,
+        "cwa_location": "麥寮",
     },
 }
 
-# --- 2. GPS 定位與港口選擇 ---
-st.subheader("📍 港口與航道選擇")
-geo_data = get_geolocation()
-auto_detected_port = "高雄港第一航道"
 
-if geo_data and "coords" in geo_data:
-    user_lat = geo_data["coords"]["latitude"]
-    user_lon = geo_data["coords"]["longitude"]
-    min_dist = float("inf")
-    for port_name, info in TAIWAN_PORTS.items():
-        dist = (user_lat - info["lat"]) ** 2 + (user_lon - info["lon"]) ** 2
-        if dist < min_dist:
-            min_dist = dist
-            auto_detected_port = port_name
-    st.success(f"📍 自動定位至最近港口：**{auto_detected_port}**")
+# ============================================================
+# 頁面標題
+# ============================================================
 
-port_options = list(TAIWAN_PORTS.keys())
-default_index = (
-    port_options.index(auto_detected_port)
-    if auto_detected_port in port_options
-    else 0
+now = datetime.now(TW_TZ)
+
+st.title("⚓ 台灣港口潮汐與 UKC 評估系統")
+
+st.caption(
+    "中央氣象署潮汐資料 × 港口航道水深 × 船舶靜態吃水"
 )
-selected_port = st.selectbox(
-    "請選擇目標港口/航道：", port_options, index=default_index
-)
-
-current_port_info = TAIWAN_PORTS[selected_port]
-channel_depth = current_port_info["depth"]
-cwa_location = current_port_info["cwa_location"]
-station_name = current_port_info["station_name"]
-
-# --- 3. 船舶吃水與動態 Squat (下沉量) 計算 ---
-st.subheader("🚢 船舶參數與動態 Squat 下沉量計算")
-col1, col2, col3 = st.columns(3)
-with col1:
-    draft = st.number_input(
-        "靜態吃水 Static Draft (m)",
-        min_value=5.0,
-        max_value=25.0,
-        value=16.0,
-        step=0.1,
-    )
-with col2:
-    speed = st.number_input(
-        "對地航速 Speed (kts)",
-        min_value=0.0,
-        max_value=25.0,
-        value=6.0,
-        step=0.5,
-    )
-with col3:
-    cb = st.number_input(
-        "方形係數 Block Coeff (Cb)",
-        min_value=0.50,
-        max_value=0.95,
-        value=0.80,
-        step=0.05,
-    )
-
-squat = round((cb * (speed**2)) / 100.0, 2)
-dynamic_draft = round(draft + squat, 2)
 
 st.write(
-    f"**航道設計水深**：`{channel_depth}m` ｜ **計算下沉量 (Squat)**：`{squat}m` ｜ **總動態吃水**：`{dynamic_draft}m`"
+    f"系統時間：{now.strftime('%Y-%m-%d %H:%M:%S')} "
+    "(台灣時間)"
 )
-# --- 4. 完全呼叫中央氣象署 (CWA) API 抓取資料 ---
-CWA_API_KEY = "CWA-BD9BB68F-C6F0-4960-B0F0-98E82A8C3AB3"
 
+
+# ============================================================
+# API Key 檢查
+# ============================================================
+
+if not CWA_API_KEY:
+
+    st.error(
+        "尚未設定中央氣象署 API Key。"
+    )
+
+    st.info(
+        """
+請到 Streamlit Cloud：
+
+Settings → Secrets
+
+加入：
+
+CWA_API_KEY = "你的 API Key"
+"""
+    )
+
+    st.stop()
+
+
+# ============================================================
+# 港口選擇
+# ============================================================
+
+st.divider()
+
+st.header("📍 1. 選擇港口")
+
+port_name = st.selectbox(
+    "目標港口 / 航道",
+    list(PORTS.keys()),
+)
+
+port_info = PORTS[port_name]
+
+channel_depth = float(
+    port_info["depth"]
+)
+
+cwa_location = port_info[
+    "cwa_location"
+]
+
+
+col1, col2 = st.columns(2)
+
+with col1:
+
+    st.metric(
+        "航道設計水深",
+        f"{channel_depth:.2f} m",
+    )
+
+with col2:
+
+    st.metric(
+        "CWA 潮汐地點",
+        cwa_location,
+    )
+
+
+# ============================================================
+# 船舶吃水
+# ============================================================
+
+st.divider()
+
+st.header("🚢 2. 船舶資料")
+
+draft = st.number_input(
+    "船舶靜態吃水 (m)",
+    min_value=0.1,
+    max_value=30.0,
+    value=16.0,
+    step=0.1,
+)
+
+
+# ============================================================
+# CWA API 函式
+# ============================================================
 
 @st.cache_data(ttl=1800)
-def fetch_cwa_api_tides(api_key, target_station, target_city):
-    """從中央氣象署 F-A0021-001 API 抓取並匹配潮汐預報數據"""
-    url = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-A0021-001"
-    params = {"Authorization": api_key}
-    try:
-        res = requests.get(url, params=params, timeout=10, verify=False)
-        if res.status_code == 200:
-            data = res.json()
+def fetch_cwa_tide(
+    api_key: str,
+    location_name: str,
+):
 
-            # 取得原始地點陣列 (相容氣象署不同版本 JSON 結構)
-            records = data.get("records", {})
-            locations = (
-                records.get("location")
-                or records.get("Location")
-                or records.get("Station")
-                or []
+    params = {
+        "Authorization": api_key,
+        "locationName": location_name,
+        "limit": 1000,
+    }
+
+    try:
+
+        response = requests.get(
+            CWA_API_URL,
+            params=params,
+            timeout=20,
+        )
+
+    except requests.exceptions.Timeout:
+
+        return None, "CWA API 連線逾時。"
+
+    except requests.exceptions.RequestException as e:
+
+        return None, f"HTTP 連線錯誤：{e}"
+
+    # --------------------------------------------------------
+    # HTTP 狀態
+    # --------------------------------------------------------
+
+    if response.status_code != 200:
+
+        return None, (
+            f"CWA HTTP {response.status_code}\n\n"
+            f"{response.text[:500]}"
+        )
+
+    # --------------------------------------------------------
+    # JSON
+    # --------------------------------------------------------
+
+    try:
+
+        data = response.json()
+
+    except ValueError:
+
+        return None, (
+            "CWA 回傳資料不是有效 JSON。\n\n"
+            f"{response.text[:500]}"
+        )
+
+    # --------------------------------------------------------
+    # API success
+    # --------------------------------------------------------
+
+    if str(data.get("success")).lower() != "true":
+
+        return None, (
+            "CWA API 回傳失敗。\n\n"
+            f"{data}"
+        )
+
+    # --------------------------------------------------------
+    # records
+    # --------------------------------------------------------
+
+    records = data.get(
+        "records",
+        {}
+    )
+
+    locations = records.get(
+        "location",
+        []
+    )
+
+    if not locations:
+
+        return None, (
+            f"CWA 沒有回傳 {location_name} "
+            "的潮汐地點資料。"
+        )
+
+    # --------------------------------------------------------
+    # 找地點
+    # --------------------------------------------------------
+
+    target_location = None
+
+    for location in locations:
+
+        name = str(
+            location.get(
+                "locationName",
+                ""
+            )
+        )
+
+        if name == location_name:
+
+            target_location = location
+            break
+
+    # --------------------------------------------------------
+    # 模糊搜尋
+    # --------------------------------------------------------
+
+    if target_location is None:
+
+        for location in locations:
+
+            name = str(
+                location.get(
+                    "locationName",
+                    ""
+                )
             )
 
-            if isinstance(locations, dict):
-                locations = [locations]
+            if location_name in name:
 
-            target_loc = None
+                target_location = location
+                break
 
-            # 1. 第一優先：精準或模糊搜尋對應測站
-            for loc in locations:
-                loc_str = str(loc)
-                if target_station in loc_str or target_city in loc_str:
-                    target_loc = loc
-                    break
+    if target_location is None:
 
-            # 2. 第二優先：若找不到，自動使用回傳的第 1 個測站，確保系統不崩潰
-            if not target_loc and locations:
-                target_loc = locations[0]
+        available = [
+            location.get(
+                "locationName",
+                ""
+            )
+            for location in locations
+        ]
 
-            if target_loc:
-                parsed_tides = {}
+        return None, (
+            f"找不到 CWA 地點：{location_name}\n\n"
+            f"API 回傳地點：{available}"
+        )
 
-                # 解析時間與潮高數據
-                # 氣象署 F-A0021-001 常用結構：Location -> validTime / time / weatherElement
-                v_times = (
-                    target_loc.get("validTime")
-                    or target_loc.get("time")
-                    or target_loc.get("WeatherElement")
-                    or []
+    # ========================================================
+    # 解析潮汐
+    # ========================================================
+
+    tide_rows = []
+
+    valid_times = target_location.get(
+        "validTime",
+        []
+    )
+
+    for valid_time in valid_times:
+
+        weather_elements = valid_time.get(
+            "weatherElement",
+            []
+        )
+
+        for element in weather_elements:
+
+            element_name = str(
+                element.get(
+                    "elementName",
+                    ""
+                )
+            )
+
+            tide_times = element.get(
+                "time",
+                []
+            )
+
+            for tide_time in tide_times:
+
+                data_time = tide_time.get(
+                    "dataTime",
+                    ""
                 )
 
-                for item in v_times:
-                    raw_t = (
-                        item.get("startTime")
-                        or item.get("dataTime")
-                        or item.get("DataTime")
-                        or item.get("time", "")
-                    )
-                    t_key = (
-                        raw_t.replace("T", " ")[:13] + ":00:00"
-                        if raw_t
-                        else ""
-                    )
+                if not data_time:
+                    continue
 
-                    elements = (
-                        item.get("weatherElement")
-                        or item.get("element")
-                        or item.get("Element")
-                        or []
-                    )
-                    for elem in elements:
-                        e_name = str(
-                            elem.get("elementName")
-                            or elem.get("ElementName")
-                            or ""
+                parameters = tide_time.get(
+                    "parameter",
+                    []
+                )
+
+                for parameter in parameters:
+
+                    parameter_name = str(
+                        parameter.get(
+                            "parameterName",
+                            ""
                         )
-                        if any(
-                            k in e_name
-                            for k in [
-                                "TideHeights",
-                                "TideHeight",
-                                "潮高",
-                                "Tide",
-                            ]
-                        ):
-                            val = (
-                                elem.get("elementValue")
-                                or elem.get("ElementValue")
-                                or elem.get("value")
-                            )
-                            if val is not None:
-                                try:
-                                    cm_val = float(val)
-                                    parsed_tides[t_key] = round(
-                                        cm_val / 100.0, 2
-                                    )
-                                except ValueError:
-                                    pass
-
-                # 若成功解析到潮汐數據則回傳
-                if parsed_tides:
-                    return parsed_tides, None
-
-                # 備用機制：若欄位結構極特殊，進行深度遞迴搜尋數值
-                for item in v_times:
-                    raw_t = item.get("startTime") or item.get("DataTime", "")
-                    t_key = (
-                        raw_t.replace("T", " ")[:13] + ":00:00"
-                        if raw_t
-                        else ""
                     )
-                    # 強制尋找任何數值型態
-                    for k, v in item.items():
-                        if (
-                            isinstance(v, (int, float))
-                            and t_key
-                            and t_key not in parsed_tides
-                        ):
-                            parsed_tides[t_key] = round(float(v) / 100.0, 2)
 
-                if parsed_tides:
-                    return parsed_tides, None
+                    parameter_value = parameter.get(
+                        "parameterValue"
+                    )
 
-            return None, "氣象署 JSON 回傳結構中未包含可解析之潮高欄位"
-        else:
-            return None, f"HTTP 錯誤代碼: {res.status_code}"
-    except Exception as e:
-        return None, f"連線解析異常: {str(e)}"
+                    parameter_measure = str(
+                        parameter.get(
+                            "parameterMeasure",
+                            ""
+                        )
+                    )
+
+                    if parameter_value is None:
+                        continue
+
+                    try:
+
+                        value = float(
+                            parameter_value
+                        )
+
+                    except (
+                        ValueError,
+                        TypeError
+                    ):
+
+                        continue
+
+                    # ------------------------------------------------
+                    # 判斷是否為潮高
+                    # ------------------------------------------------
+
+                    is_tide = (
+                        "潮高" in parameter_name
+                        or "Tide" in parameter_name
+                        or "height" in parameter_name.lower()
+                    )
+
+                    if not is_tide:
+                        continue
+
+                    # ------------------------------------------------
+                    # 單位
+                    # ------------------------------------------------
+
+                    measure_lower = (
+                        parameter_measure.lower()
+                    )
+
+                    if (
+                        "cm" in measure_lower
+                        or "公分" in parameter_measure
+                    ):
+
+                        value = value / 100.0
+
+                    tide_rows.append(
+                        {
+                            "datetime": data_time,
+                            "tide_m": value,
+                            "parameter": parameter_name,
+                            "measure": parameter_measure,
+                            "station": target_location.get(
+                                "locationName",
+                                ""
+                            ),
+                            "station_id": target_location.get(
+                                "stationId",
+                                ""
+                            ),
+                        }
+                    )
+
+    # ========================================================
+    # 沒抓到潮汐
+    # ========================================================
+
+    if not tide_rows:
+
+        return None, (
+            "API 已成功連線，但沒有解析到潮高資料。"
+        )
+
+    # ========================================================
+    # DataFrame
+    # ========================================================
+
+    df = pd.DataFrame(
+        tide_rows
+    )
+
+    df = df.drop_duplicates(
+        subset=[
+            "datetime",
+            "tide_m",
+        ]
+    )
+
+    # --------------------------------------------------------
+    # 時間
+    # --------------------------------------------------------
+
+    df["datetime"] = pd.to_datetime(
+        df["datetime"],
+        errors="coerce",
+    )
+
+    df = df.dropna(
+        subset=["datetime"]
+    )
+
+    # --------------------------------------------------------
+    # 加上台灣時區
+    # --------------------------------------------------------
+
+    if df["datetime"].dt.tz is None:
+
+        df["datetime"] = (
+            df["datetime"]
+            .dt.tz_localize(
+                "Asia/Taipei"
+            )
+        )
+
+    else:
+
+        df["datetime"] = (
+            df["datetime"]
+            .dt.tz_convert(
+                "Asia/Taipei"
+            )
+        )
+
+    # --------------------------------------------------------
+    # 排序
+    # --------------------------------------------------------
+
+    df = df.sort_values(
+        "datetime"
+    )
+
+    df = df.reset_index(
+        drop=True
+    )
+
+    return df, None
 
 
-# 執行 API 抓取
-cwa_tides, err_msg = fetch_cwa_api_tides(
-    CWA_API_KEY, station_name, cwa_location
+# ============================================================
+# 呼叫 CWA
+# ============================================================
+
+st.divider()
+
+st.header("🌊 3. 中央氣象署潮汐資料")
+
+with st.spinner(
+    f"正在取得 {cwa_location} 潮汐資料..."
+):
+
+    tide_df, error = fetch_cwa_tide(
+        CWA_API_KEY,
+        cwa_location,
+    )
+
+
+# ============================================================
+# API 錯誤
+# ============================================================
+
+if error:
+
+    st.error(
+        "潮汐資料取得失敗"
+    )
+
+    with st.expander(
+        "查看詳細錯誤"
+    ):
+
+        st.code(
+            error
+        )
+
+    st.stop()
+
+
+# ============================================================
+# API 成功
+# ============================================================
+
+st.success(
+    f"✅ CWA API 連線成功 "
+    f"｜ 測站：{cwa_location} "
+    f"｜ 資料筆數：{len(tide_df)}"
 )
+
+
+# ============================================================
+# 找目前時間附近的潮高
+# ============================================================
+
+current_time = datetime.now(
+    TW_TZ
+)
+
+tide_df["time_difference"] = (
+    tide_df["datetime"]
+    - current_time
+).abs()
+
+nearest_index = (
+    tide_df["time_difference"]
+    .idxmin()
+)
+
+nearest = tide_df.loc[
+    nearest_index
+]
+
+current_tide = float(
+    nearest["tide_m"]
+)
+
+tide_time = nearest[
+    "datetime"
+]
+
+
+# ============================================================
+# 目前潮汐
+# ============================================================
+
+st.subheader(
+    "🕐 目前潮汐"
+)
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+
+    st.metric(
+        "目前估算潮高",
+        f"{current_tide:.2f} m",
+    )
+
+with col2:
+
+    st.metric(
+        "對應時間",
+        tide_time.strftime(
+            "%Y-%m-%d %H:%M"
+        ),
+    )
+
+with col3:
+
+    difference_minutes = (
+        nearest["time_difference"]
+        .total_seconds()
+        / 60
+    )
+
+    st.metric(
+        "與目前時間差",
+        f"{difference_minutes:.0f} 分鐘",
+    )
+
+
+# ============================================================
+# UKC
+# ============================================================
+
+st.divider()
+
+st.header("⚓ 4. UKC 評估")
+
+
+effective_depth = (
+    channel_depth
+    + current_tide
+)
+
+ukc = (
+    effective_depth
+    - draft
+)
+
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+
+    st.metric(
+        "航道水深",
+        f"{channel_depth:.2f} m",
+    )
+
+with col2:
+
+    st.metric(
+        "目前潮高",
+        f"{current_tide:.2f} m",
+    )
+
+with col3:
+
+    st.metric(
+        "計算水深",
+        f"{effective_depth:.2f} m",
+    )
+
+
+st.metric(
+    "UKC",
+    f"{ukc:.2f} m",
+)
+
+
+# ============================================================
+# UKC 結果
+#
+# 注意：
+# 這只是數學上的基本 UKC 計算，
+# 尚未加入 Squat、波浪、船舶搖擺、
+# 密度、測量誤差、航道安全裕度等因素。
+# ============================================================
+
+if ukc < 0:
+
+    st.error(
+        f"❌ UKC = {ukc:.2f} m\n\n"
+        "以目前輸入條件計算，"
+        "船舶靜態吃水超過計算水深。"
+    )
+
+elif ukc < 1.0:
+
+    st.warning(
+        f"⚠️ UKC = {ukc:.2f} m\n\n"
+        "目前剩餘水深裕度較小。"
+    )
+
+else:
+
+    st.success(
+        f"🟢 UKC = {ukc:.2f} m"
+    )
+
+
+# ============================================================
+# 未來潮汐
+# ============================================================
+
+st.divider()
+
+st.header("📅 未來潮汐預報")
+
+display_df = tide_df[
+    [
+        "datetime",
+        "tide_m",
+    ]
+].copy()
+
+display_df["datetime"] = (
+    display_df["datetime"]
+    .dt.strftime(
+        "%Y-%m-%d %H:%M"
+    )
+)
+
+display_df = display_df.rename(
+    columns={
+        "datetime": "時間",
+        "tide_m": "潮高 (m)",
+    }
+)
+
+st.dataframe(
+    display_df,
+    use_container_width=True,
+    hide_index=True,
+)
+
+
+# ============================================================
+# 系統資訊
+# ============================================================
+
+with st.expander(
+    "🔧 系統 / API 診斷資訊"
+):
+
+    st.write(
+        "CWA API：",
+        CWA_API_URL,
+    )
+
+    st.write(
+        "CWA 地點：",
+        cwa_location,
+    )
+
+    st.write(
+        "CWA Station ID：",
+        nearest.get(
+            "station_id",
+            "",
+        ),
+    )
+
+    st.write(
+        "資料筆數：",
+        len(tide_df),
+    )
+
+    st.write(
+        "最後更新時間：",
+        now.strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ),
+    )
