@@ -4,6 +4,10 @@ import pytz
 import requests
 import streamlit as st
 from streamlit_js_eval import get_geolocation
+import urllib3
+
+# 關閉不安全 HTTPS 請求的 SSL 警告訊息
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 頁面基本設定
 st.set_page_config(
@@ -164,9 +168,13 @@ CWA_API_KEY = "CWA-BD9BB68F-C6F0-4960-B0F0-98E82A8C3AB3"
 @st.cache_data(ttl=1800)  # 快取 30 分鐘
 def fetch_cwa_api_tides(api_key, location):
     """直接從中央氣象署 F-A0021-001 開放資料 API 抓取逐時潮汐預報數據"""
-    url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-A0021-001?Authorization={api_key}&LocationName={location}"
+    url = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-A0021-001"
+    params = {"Authorization": api_key, "LocationName": location}
     try:
-        res = requests.get(url, timeout=10)
+        # 加入 verify=False 繞過 Streamlit 伺服器的 SSL 憑證驗證問題
+        res = requests.get(
+            url, params=params, timeout=10, verify=False
+        )
         if res.status_code == 200:
             data = res.json()
             locations = data["records"]["location"]
